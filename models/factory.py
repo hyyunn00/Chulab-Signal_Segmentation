@@ -47,7 +47,8 @@ def build_model_from_config(config):
             out_channels=model_params.get("out_channels", 1),
             feature_size=model_params.get("feature_size", 48),
             use_checkpoint=model_params.get("use_checkpoint", False),
-            spatial_dims=model_params.get("spatial_dims", 3)
+            spatial_dims=model_params.get("spatial_dims", 3),
+            pretrained_ssl_path=model_params.get("pretrained_ssl_path")
         )
     
     elif model_type == "vnet":

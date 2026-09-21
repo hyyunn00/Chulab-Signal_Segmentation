@@ -1,0 +1,86 @@
+{
+  "resources": {
+    "numba_threads": 16,
+    "dask_threads": 16,
+    "io_workers": 8,
+    "metrics_workers": 16,
+    "memory_limit": 64
+  },
+  "normalization": {
+    "description": "Registry of available intensity normalization methods.",
+    "z-score": {
+      "std_multiplier": 1.0
+    },
+    "min-max": {},
+    "histogram": {
+      "bins": 1024
+    },
+    "min-max-gamma": {
+      "gamma": 2.2
+    }
+  },
+  "model": {
+    "description": "Registry of available model architectures and their default parameters. Reused as-is by pretrain.py to build the backbone (only spatial_dims is overridden, from pretrain.patch_size).",
+    "unet": {
+      "spatial_dims": 3,
+      "in_channels": 1,
+      "out_channels": 1,
+      "channels": [32, 64, 128, 256, 512],
+      "strides": [2, 2, 2, 2],
+      "num_res_units": 2,
+      "dropout": 0.1
+    },
+    "attention_unet": {
+      "spatial_dims": 3,
+      "in_channels": 1,
+      "out_channels": 1,
+      "channels": [32, 64, 128, 256, 512],
+      "strides": [2, 2, 2, 2],
+      "dropout": 0.1
+    },
+    "swin_unetr": {
+      "spatial_dims": 3,
+      "in_channels": 1,
+      "out_channels": 1,
+      "feature_size": 48,
+      "use_checkpoint": false
+    },
+    "vnet": {
+      "spatial_dims": 3,
+      "in_channels": 1,
+      "out_channels": 1,
+      "dropout_prob": 0.5
+    }
+  },
+  "pretrain": {
+    "description": "Tier-3 cross-biomarker self-supervised backbone pretraining (pretrain.py). data_path lists raw image-only volume roots across ANY biomarker/dataset - no masks required. Produces a biomarker-agnostic backbone checkpoint that train.py's train.pretrained_path can warm-start from for a brand-new biomarker.",
+    "device": "cuda:1",
+    "data_path": [
+      "/mnt/DAS218T/Ian_Huang/Chulab-Signal_Segmentation/datas/c-Fos/Hung-Yu-3D/training-data/Hung-Yu-3D",
+      "/mnt/DAS218T/Ian_Huang/Chulab-Signal_Segmentation/datas/Tumor_CD31/training-data/I-AN-3D"
+    ],
+    "save_path": "/mnt/DAS218T/Ian_Huang/Chulab-Signal_Segmentation/output/pretrained_backbones",
+    "model_type": "unet",
+    "run_name": "unet_ssl_v1",
+    "input_name": "images",
+    "preprocess": {
+      "normalize_mode": "z-score",
+      "pad_mode": "reflect",
+      "sample_rate": 0.2,
+      "low_cut": null,
+      "high_cut": null
+    },
+    "patch_size": [64, 64, 64],
+    "overlap": [0, 0, 0],
+    "max_patches_per_volume": 200,
+    "seed": 42,
+    "batch_size": 8,
+    "num_workers": 8,
+    "mask_ratio": 0.6,
+    "mask_block_size": 8,
+    "learning_rate": 0.0001,
+    "weight_decay": 1e-05,
+    "epochs": 100,
+    "checkpoint_interval": 10
+  }
+}

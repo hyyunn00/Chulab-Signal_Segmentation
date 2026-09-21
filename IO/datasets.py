@@ -330,6 +330,136 @@ class InferenceMicroscopyDataset(BaseMicroscopyDataset):
             is_patch_mode=True
         )
 
+class UnlabeledMicroscopyDataset(BaseMicroscopyDataset):
+    """
+    Unlabeled volumetric patch dataset for self-supervised backbone pretraining
+    (Tier 3 of the transfer-learning pipeline, see pretrain.py). Walks
+    image-only folders across any number of biomarkers/datasets - no mask
+    counterpart is required, since the point of self-supervised pretraining
+    is to use every raw volume the lab has, regardless of which biomarker it
+    was collected for, to produce one biomarker-agnostic backbone checkpoint
+    per architecture.
+    """
+    @classmethod
+    def from_folders(
+        cls,
+        full_config: dict,
+        image_roots: Union[str, List[str]],
+        patch_size: Tuple[int, int, int],
+        overlap: Tuple[int, int, int],
+        transform: Optional[Callable] = None,
+        input_name: str = "images",
+        io_workers: int = 4,
+        max_patches_per_volume: Optional[int] = None,
+        seed: int = 42,
+    ) -> "UnlabeledMicroscopyDataset":
+        from utils.normalization import build_normalizer_from_config
+
+        image_roots = [image_roots] if isinstance(image_roots, str) else image_roots
+        pretrain_config = full_config.get("pretrain", {})
+        preprocess_config = pretrain_config.get("preprocess", {})
+        pad_mode = preprocess_config.get("pad_mode", "constant")
+
+        rng = np.random.default_rng(seed)
+        all_image_patches = []
+
+        volumes_found: List[Path] = []
+        for root in image_roots:
+            root_path = Path(root)
+            for p in root_path.rglob("*"):
+                if p.is_dir() and p.name == input_name:
+                    volumes_found.append(p)
+
+        if not volumes_found:
+            raise RuntimeError(f"No '{input_name}' volume directories found under {image_roots}")
+
+        for img_path in sorted(volumes_found):
+            img_reader = FileReader(
+                img_path,
+                io_workers=io_workers,
+                compute_stats=True,
+                stats_sample_rate=preprocess_config.get("sample_rate", 1.0),
+                low_cut=preprocess_config.get("low_cut"),
+                high_cut=preprocess_config.get("high_cut"),
+                compute_histogram=(preprocess_config.get("normalize_mode", "z-score") == "histogram")
+            )
+            img_data = img_reader.read(out_dtype=np.float32)
+
+            vol_pad = _volume_pad_widths(img_data.shape, patch_size)
+            if any(before + after > 0 for before, after in vol_pad):
+                padded_shape = tuple(img_data.shape[i] + vol_pad[i][0] + vol_pad[i][1] for i in range(3))
+                logger.info(f"[pretrain] Volume {img_path}: padded {img_data.shape} -> {padded_shape} (mode={pad_mode})")
+                img_data = _pad_image(img_data, vol_pad, pad_mode, fill=0.0)
+
+            normalizer = build_normalizer_from_config(full_config, img_reader, mode="pretrain")
+            img_data = normalizer(img_data)
+
+            indices = generate_patch_indices(img_data.shape, patch_size, overlap)
+            if max_patches_per_volume is not None and len(indices) > max_patches_per_volume:
+                chosen = rng.choice(len(indices), size=max_patches_per_volume, replace=False)
+                indices = [indices[i] for i in sorted(chosen)]
+
+            img_patches = extract_data_from_indices(img_data, indices, as_stack=True)
+
+            n, d, h, w = img_patches.shape
+            pad_d, pad_h, pad_w = _div32_pad_widths(d, h, w, is_3d=(d > 1))
+            if pad_d > 0 or pad_h > 0 or pad_w > 0:
+                patch_pad = ((0, 0), (0, pad_d), (0, pad_h), (0, pad_w))
+                img_patches = _pad_image(img_patches, patch_pad, pad_mode, fill=normalizer.get_background_value())
+
+            all_image_patches.append(torch.from_numpy(img_patches).unsqueeze(1))
+            logger.info(f"[pretrain] Volume {img_path}: extracted {len(indices)} unlabeled patches.")
+
+        if not all_image_patches:
+            raise RuntimeError(f"No unlabeled patches were extracted from {image_roots}")
+
+        image_stack = torch.cat(all_image_patches).share_memory_()
+        patch_indices = [PatchMetadata(volume_idx=i) for i in range(len(image_stack))]
+
+        return cls(
+            image_tensors=[image_stack],
+            patch_indices=patch_indices,
+            transform=transform,
+            with_mask=False,
+            is_patch_mode=True
+        )
+
+
+def build_pretrain_dataset_from_config(
+    full_config: dict,
+    transform: Optional[Callable] = None,
+) -> UnlabeledMicroscopyDataset:
+    """
+    Builds the unlabeled dataset used for Tier-3 self-supervised backbone
+    pretraining (see pretrain.py). Reads config["pretrain"], which mirrors
+    config["train"] but takes a list of raw image-only volume roots
+    (data_path) spanning any number of biomarkers - no masks required.
+    """
+    config = full_config.get("pretrain", {})
+    resources = full_config.get("resources", {})
+    io_workers = resources.get("io_workers", 4)
+
+    image_roots = config.get("data_path")
+    if not image_roots:
+        raise ValueError("Missing 'data_path' in pretrain config.")
+
+    patch_size = tuple(config.get("patch_size", [64, 64, 64]))
+    overlap = tuple(config.get("overlap", [0, 0, 0]))
+
+    logger.info(f"Loading unlabeled pretraining data from {image_roots}...")
+    return UnlabeledMicroscopyDataset.from_folders(
+        full_config=full_config,
+        image_roots=image_roots,
+        patch_size=patch_size,
+        overlap=overlap,
+        transform=transform,
+        input_name=config.get("input_name", "images"),
+        io_workers=io_workers,
+        max_patches_per_volume=config.get("max_patches_per_volume"),
+        seed=config.get("seed", 42),
+    )
+
+
 def build_train_dataset_from_config(
     full_config: dict, 
     train_transform: Optional[Callable] = None, 

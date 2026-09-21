@@ -29,21 +29,44 @@ from monai.transforms.intensity.dictionary import NormalizeIntensityd
 from monai.transforms.utility.dictionary import ToTensord
 
 from IO import FileReader, FileWriter, InferenceMicroscopyDataset, TYPE_MAP
+from models import build_model_from_config
 from utils.cropper import compute_z_plan
 from utils.stitcher import stitch_image
 from utils.visualization import visualize_predictions
 from utils.concurrency import initialize_concurrency
+from utils.checkpoint import load_checkpoint as load_checkpoint_util
 
 # Standard transform
 inference_transform = Compose([
     ToTensord(keys=["image"], dtype=torch.float32),
 ])
 
-def load_checkpoint(model_path: str):
-    """Load a torch model checkpoint."""
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    return torch.load(model_path, weights_only=False)
+def load_checkpoint(model_path: str, full_config: dict = None) -> torch.nn.Module:
+    """
+    Load a model checkpoint for inference. Supports both the legacy whole-model
+    pickle format (torch.save(model, path)) and the new state_dict+meta format
+    (see utils/checkpoint.py). For the new format the architecture is rebuilt
+    via the same factory used at training time, using model_type/in_channels/
+    out_channels recorded in the checkpoint's meta (falling back to the
+    config's "model" section when meta is missing, e.g. an older checkpoint).
+    """
+    ckpt = load_checkpoint_util(model_path)
+    if ckpt["legacy_model"] is not None:
+        return ckpt["legacy_model"]
+
+    meta = ckpt["meta"] or {}
+    full_config = full_config or {}
+    model_type = meta.get("model_type") or full_config.get("train", {}).get("model_type", "unet")
+    model_cfg = dict(full_config.get("model", {}).get(model_type, {}))
+    if "in_channels" in meta:
+        model_cfg["in_channels"] = meta["in_channels"]
+    if "out_channels" in meta:
+        model_cfg["out_channels"] = meta["out_channels"]
+    model_cfg["model_type"] = model_type
+
+    model = build_model_from_config(model_cfg)
+    model.load_state_dict(ckpt["state_dict"])
+    return model
 
 def run_inference(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> np.ndarray:
     """Execute model inference on a dataloader. Returns (N, D, H, W)."""
@@ -319,7 +342,7 @@ def main():
 
     device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     logging.info(f"Loading model: {model_path}")
-    model = load_checkpoint(model_path).to(device)
+    model = load_checkpoint(model_path, full_config).to(device)
     
     volumes_to_process = []
     if root_input.name == input_name:

@@ -35,6 +35,7 @@ from utils.metrics import build_metrics_from_config
 from utils.plot import save_learning_curves
 from utils.concurrency import initialize_concurrency
 from utils.loss import build_loss_from_config
+from utils.checkpoint import save_checkpoint as save_checkpoint_impl, load_pretrained_into
 
 # Initialize logging
 logger = logging.getLogger(__name__)
@@ -58,11 +59,10 @@ val_transform = Compose([
     AsDiscreted(keys=["mask"], threshold=0.5),
 ])
 
-def save_checkpoint(model: torch.nn.Module, weight_path: str, name: str):
-    """Saves the model checkpoint."""
+def save_checkpoint(model: torch.nn.Module, weight_path: str, name: str, meta: Optional[Dict] = None):
+    """Saves the model checkpoint (state_dict + metadata, see utils/checkpoint.py)."""
     path = os.path.join(weight_path, f"{name}.pth")
-    torch.save(model, path)
-    logger.info(f"[OK] Model saved to {path}")
+    save_checkpoint_impl(model, path, meta=meta)
 
 def train_epoch(
     model: torch.nn.Module,
@@ -281,13 +281,29 @@ def main():
     model = build_model_from_config(full_config)
     criterion = build_loss_from_config(full_config)
     metrics = build_metrics_from_config(full_config)
-    
+
     device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     model.to(device)
 
-    # Note: If loading an existing model for fine-tuning, you would use load_checkpoint(path) here.
-    
-    optimizer = optim.AdamW(model.parameters(), lr=config.get("learning_rate", 1e-4), weight_decay=config.get("weight_decay", 1e-5))
+    # Transfer learning: warm-start from an existing checkpoint (same-architecture
+    # biomarker checkpoint, or a Tier-3 self-supervised backbone). Shape-mismatched
+    # keys (e.g. the head, if out_channels differs) are skipped automatically.
+    pretrained_path = config.get("pretrained_path")
+    if pretrained_path:
+        logger.info(f"Loading pretrained weights from {pretrained_path}")
+        load_pretrained_into(model, pretrained_path, strict_head=False)
+
+    freeze_backbone_epochs = config.get("freeze_backbone_epochs", 0)
+    backbone_lr_mult = config.get("backbone_lr_mult", 1.0)
+    if freeze_backbone_epochs > 0:
+        model.freeze_backbone()
+
+    learning_rate = config.get("learning_rate", 1e-4)
+    optimizer = optim.AdamW(
+        model.param_groups(learning_rate, backbone_lr_mult),
+        lr=learning_rate,
+        weight_decay=config.get("weight_decay", 1e-5)
+    )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     history: Dict[str, Dict[str, List[float]]] = {n: {"train": [], "val": []} for n in list(metrics.keys()) + ["loss"]}
@@ -304,7 +320,11 @@ def main():
     
     for epoch in range(config.get("training_epochs", 30)):
         print("\n"); logger.info(f"Epoch {epoch + 1}")
-        
+
+        # Unfreeze the backbone once we cross the configured warmup boundary.
+        if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs:
+            model.unfreeze_backbone()
+
         # Calculate heavy metrics only on interval epochs
         is_metric_epoch = (epoch + 1) % metric_interval == 0
         curr_metrics = metrics if is_metric_epoch else {}
@@ -349,12 +369,20 @@ def main():
 
         val_avg_loss = val_results["loss"]
 
+        ckpt_meta = {
+            "model_type": model_type,
+            "in_channels": model.in_channels,
+            "out_channels": model.out_channels,
+            "biomarker": model_name,
+            "epoch": epoch + 1,
+        }
+
         scheduler.step(val_avg_loss)
         if val_avg_loss < best_val_loss:
-            best_val_loss = val_avg_loss; save_checkpoint(model, weight_path, model_name)
-        
+            best_val_loss = val_avg_loss; save_checkpoint(model, weight_path, model_name, meta=ckpt_meta)
+
         if (epoch + 1) % 25 == 0:
-            save_checkpoint(model, weight_path, f"{model_name}_epoch_{epoch+1}")
+            save_checkpoint(model, weight_path, f"{model_name}_epoch_{epoch+1}", meta=ckpt_meta)
             
         save_learning_curves(history, artifact_path, model_name)
 

@@ -1,8 +1,9 @@
 from monai.networks.nets import VNet as MonaiVNet
-import torch.nn as nn
 import torch
 
-class VNet(nn.Module):
+from .base import BaseSegModel
+
+class VNet(BaseSegModel):
     """
     A wrapper for MONAI's VNet.
     Designed for volumetric medical image segmentation with residual connections.
@@ -16,6 +17,9 @@ class VNet(nn.Module):
         dropout_dim=3
     ):
         super().__init__()
+        self.spatial_dims = spatial_dims
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.model = MonaiVNet(
             spatial_dims=spatial_dims,
             in_channels=in_channels,

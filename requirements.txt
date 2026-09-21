@@ -6,6 +6,6 @@ imagecodecs
 nibabel
 tqdm
 matplotlib
-monai
+monai>=1.5.2
 scikit-learn
 scikit-image
